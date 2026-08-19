@@ -10,8 +10,11 @@ import co.eci.snake.core.engine.GameClock;
 import javax.swing.*;
 import java.awt.*;
 import java.awt.event.ActionEvent;
+import java.awt.event.WindowAdapter;
+import java.awt.event.WindowEvent;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public final class SnakeApp extends JFrame {
@@ -19,8 +22,11 @@ public final class SnakeApp extends JFrame {
   private final Board board;
   private final GamePanel gamePanel;
   private final JButton actionButton;
+  private final JLabel statusLabel;
   private final GameClock clock;
+  private final ExecutorService executor;
   private final java.util.List<Snake> snakes = new java.util.ArrayList<>();
+  private boolean started;
 
   public SnakeApp() {
     super("The Snake Race");
@@ -35,11 +41,15 @@ public final class SnakeApp extends JFrame {
     }
 
     this.gamePanel = new GamePanel(board, () -> snakes);
-    this.actionButton = new JButton("Action");
+    this.actionButton = new JButton("Start");
+    this.statusLabel = new JLabel("Running");
 
     setLayout(new BorderLayout());
     add(gamePanel, BorderLayout.CENTER);
-    add(actionButton, BorderLayout.SOUTH);
+    var controls = new JPanel(new BorderLayout());
+    controls.add(actionButton, BorderLayout.WEST);
+    controls.add(statusLabel, BorderLayout.CENTER);
+    add(controls, BorderLayout.SOUTH);
 
     setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
     pack();
@@ -47,16 +57,24 @@ public final class SnakeApp extends JFrame {
 
     this.clock = new GameClock(60, () -> SwingUtilities.invokeLater(gamePanel::repaint));
 
-    var exec = Executors.newVirtualThreadPerTaskExecutor();
-    snakes.forEach(s -> exec.submit(new SnakeRunner(s, board)));
+    this.executor = Executors.newVirtualThreadPerTaskExecutor();
+    clock.registerRunners(snakes.size());
 
-    actionButton.addActionListener((ActionEvent e) -> togglePause());
+    addWindowListener(new WindowAdapter() {
+      @Override
+      public void windowClosing(WindowEvent e) {
+        clock.close();
+        executor.shutdownNow();
+      }
+    });
+
+    actionButton.addActionListener((ActionEvent e) -> toggleRun());
 
     gamePanel.getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW).put(KeyStroke.getKeyStroke("SPACE"), "pause");
     gamePanel.getActionMap().put("pause", new AbstractAction() {
       @Override
       public void actionPerformed(ActionEvent e) {
-        togglePause();
+        toggleRun();
       }
     });
 
@@ -128,14 +146,55 @@ public final class SnakeApp extends JFrame {
     clock.start();
   }
 
-  private void togglePause() {
-    if ("Action".equals(actionButton.getText())) {
+  private void toggleRun() {
+    if (!started) {
+      started = true;
+      snakes.forEach(s -> executor.submit(new SnakeRunner(s, board, clock)));
+      actionButton.setText("Pause");
+      statusLabel.setText("Running");
+      clock.start();
+    } else if ("Pause".equals(actionButton.getText())) {
       actionButton.setText("Resume");
       clock.pause();
+      statusLabel.setText("Pausing...");
+      Thread.startVirtualThread(() -> {
+        try {
+          clock.awaitPaused();
+          SwingUtilities.invokeLater(this::showPauseStatistics);
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+        }
+      });
     } else {
-      actionButton.setText("Action");
+      actionButton.setText("Pause");
       clock.resume();
+      statusLabel.setText("Running");
     }
+  }
+
+  private void showPauseStatistics() {
+    int longestIndex = -1;
+    int longestLength = -1;
+    int firstDeadIndex = -1;
+    int firstDeathOrder = Integer.MAX_VALUE;
+    for (int i = 0; i < snakes.size(); i++) {
+      var snake = snakes.get(i);
+      if (snake.isAlive() && snake.length() > longestLength) {
+        longestIndex = i;
+        longestLength = snake.length();
+      }
+      if (!snake.isAlive() && snake.deathOrder() < firstDeathOrder) {
+        firstDeadIndex = i;
+        firstDeathOrder = snake.deathOrder();
+      }
+    }
+    String longest = (longestIndex < 0)
+        ? "none"
+        : "Snake " + longestIndex + " (" + longestLength + " cells)";
+    String firstDead = (firstDeadIndex < 0)
+        ? "none"
+        : "Snake " + firstDeadIndex;
+    statusLabel.setText("Paused | Longest alive: " + longest + " | First dead: " + firstDead);
   }
 
   public static final class GamePanel extends JPanel {

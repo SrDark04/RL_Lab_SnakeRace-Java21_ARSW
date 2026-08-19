@@ -24,7 +24,7 @@ mvn -q -DskipTests exec:java -Dsnakes=4
 - **Controles**:
   - **Flechas**: serpiente **0** (Jugador 1).
   - **WASD**: serpiente **1** (si existe).
-  - **Espacio** o botón **Action**: Pausar / Reanudar.
+  - **Espacio** o botón **Start / Pause / Resume**: controlar la ejecución.
 
 ---
 
@@ -66,6 +66,21 @@ co.eci.snake
 
 > Objetivo didáctico: practicar suspensión/continuación **sin** espera activa y consolidar el modelo de monitores en Java.
 
+
+## Solucion primer parte
+
+2. Las modificaciones las cuales se le hicieron a los codigos fueron las siguientes:
+    
+    ![](src/main/java/co/eci/snake/images/PrimerPunto1.png)
+    ![](src/main/java/co/eci/snake/images/PrimerPunto2.png)
+    ![](src/main/java/co/eci/snake/images/PrimerPunto3.png) 
+
+    Bajo este concepto podemos ver la creacion de una clase llamada PausedControl, la cual nos va a permitir el uso de las pausas y reactivacion de los ciclos cuando usemos estos mismo para pararlos.
+    
+3. La clase `PausedControl` utiliza el mismo monitor compartido por todos los hilos `PrimeFinderThread`. Sus métodos `pauseAllThreads()`, `resumeAllThreads()` y `waitIfPaused()` son `synchronized`, por lo que solo un hilo puede modificar o consultar la condición de pausa a la vez. La variable `paused` representa la condición: cuando es `true`, cada trabajador ejecuta `wait()` y queda suspendido sin consumir CPU. Cuando el usuario presiona ENTER, `resumeAllThreads()` cambia `paused` a `false` y ejecuta `notifyAll()`, despertando a todos los trabajadores para que continúen.
+
+4. El uso de `while (paused)` evita problemas de notificaciones perdidas y despertares inesperados: después de despertar, cada hilo vuelve a comprobar la condición antes de continuar. Se utiliza `notifyAll()` porque pueden existir varios `PrimeFinderThread` esperando sobre el mismo monitor; `notify()` solo despertaría a uno. No hay busy-waiting, porque los hilos no revisan continuamente la condición: permanecen bloqueados con `wait()` y se reactivan mediante `notifyAll()`. La pausa no es instantánea, ya que cada trabajador se detiene cuando llega a `waitIfPaused()`.
+
 ---
 
 ## Parte II — SnakeRace concurrente (núcleo del laboratorio)
@@ -96,9 +111,39 @@ co.eci.snake
 
 - Ejecuta con **N alto** (`-Dsnakes=20` o más) y/o aumenta la velocidad.
 - El juego **no debe romperse**: sin `ConcurrentModificationException`, sin lecturas inconsistentes, sin _deadlocks_.
-- Si habilitas **teleports** y **turbo**, verifica que las reglas no introduzcan carreras.
+- Si habilitas **teleports** y **turbo**, verifica que las reglas no introduzcan carreras.System.out.println("========================= RESUMED ===========================");
 
 > Entregables detallados más abajo.
+
+## Solucion segunda parte
+
+1. Cada serpiente se ejecuta de forma independiente mediante un `SnakeRunner` enviado a un hilo virtual. En cada ciclo, el hilo cambia opcionalmente la dirección, ejecuta `board.step(snake)` y espera con `Thread.sleep`, permitiendo que las demás serpientes continúen simultáneamente. El tablero es un recurso compartido, pero sus colecciones se protegen con métodos `synchronized` y las lecturas devuelven copias. La dirección de cada serpiente es `volatile` porque la modifica la UI y la lee su hilo de movimiento. Existe una posible condición de carrera sobre el cuerpo (`ArrayDeque`) entre `advance` y `snapshot`, por lo que ambos métodos deben sincronizarse. No se detecta busy-waiting: los hilos utilizan `Thread.sleep` y el reloj usa `scheduleAtFixedRate`; sin embargo, la pausa actual detiene los repintados, pero no los hilos de las serpientes.
+
+2. En `Board.step(...)` se modificó la sincronización para proteger únicamente la región crítica que accede a las colecciones compartidas del tablero. El cálculo de la siguiente posición se realiza antes del bloqueo, mientras que la verificación de obstáculos, teletransportadores, ratones y turbo se ejecuta dentro de `synchronized (this)`. De esta manera, dos hilos no pueden modificar simultáneamente esas colecciones ni consumir el mismo recurso, pero el bloqueo no cubre operaciones que no pertenecen al estado común del tablero.
+
+    `snake.advance(next, ateMouse)` se dejó fuera del bloque sincronizado porque modifica únicamente el estado de esa serpiente y no las colecciones del tablero. Así se reduce el tiempo durante el cual otros hilos deben esperar para acceder al tablero. En esta clase no existe espera activa: los hilos se bloquean mediante `synchronized` cuando es necesario y el movimiento espera mediante `Thread.sleep`, sin consumir CPU en un ciclo de comprobación continua.
+  
+    ![Código modificado de Board.step](src/main/java/co/eci/snake/images/CodeSeconPoint1.png)
+
+    La región crítica tiene el alcance mínimo necesario: protege las operaciones `contains`, `remove` y `add` que deben ejecutarse coordinadamente. La modificación no resuelve la posible carrera entre `Snake.advance(...)` y `Snake.snapshot()`, porque esa protección pertenece a `Snake` y debe implementarse allí sincronizando ambos métodos sobre el mismo monitor.
+
+  3. La UI ahora tiene tres estados: **Start**, **Pause** y **Resume**. Al iniciar se crean los `SnakeRunner` y comienza `GameClock`. Al pausar, `GameClock` activa una bandera protegida por `ReentrantLock` y `Condition`; cada runner llega a `awaitIfPaused()` y espera sin consumir CPU. La UI ejecuta `awaitPaused()` en un hilo virtual y solo después actualiza el estado visual, garantizando que ningún runner esté modificando una serpiente mientras se calculan las estadísticas.
+
+    Durante la pausa se calcula la serpiente viva más larga usando una lectura sincronizada de `length()`. Para registrar la peor serpiente, `Snake` mantiene `alive` y un `deathOrder` asignado atómicamente cuando ocurre una colisión con su propio cuerpo. La primera serpiente que muere es la que tiene el menor `deathOrder`. Si todavía no ha muerto ninguna, la UI muestra `none`.
+
+  4. Para soportar una carga alta, cada runner usa un hilo virtual y el estado compartido del tablero se modifica dentro de la región crítica de `Board.step(...)`. Las colecciones `HashSet` y `HashMap` no se exponen directamente: los métodos de lectura devuelven copias y están sincronizados. Además, `Snake.snapshot()`, `advance()`, `contains()`, `length()` e `isAlive()` están sincronizados para evitar lecturas inconsistentes del `ArrayDeque`.
+
+      La coordinación usa `Condition` y no busy-waiting: los runners esperan mediante `await()` y se despiertan con `signalAll()` al reanudar. Al cerrar la ventana se detienen el `GameClock` y el executor. La prueba de carga se puede realizar con:
+
+      ```bash
+      mvn clean verify
+      mvn -q -DskipTests exec:java -Dsnakes=20
+      ```
+
+      Durante la prueba se debe verificar que no aparezcan `ConcurrentModificationException`, lecturas parciales, deadlocks ni errores al consumir teletransportadores o turbo. La protección del tablero hace que la operación de retirar un ratón o turbo y generar nuevos elementos sea atómica para todos los runners.
+
+      ![](src/main/java/co/eci/snake/images/GameRun.png)
+
 
 ---
 
