@@ -5,6 +5,13 @@ Laboratorio de programación concurrente: condiciones de carrera, sincronizació
 
 ---
 
+## Estudiantes
+
+ - Roger Mauricio Duran Guacaneme
+ - Camilo Alfonso Leon Acosta
+
+---
+
 ## Requisitos
 
 - **JDK 21** (Temurin recomendado)
